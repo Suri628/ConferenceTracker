@@ -2,8 +2,9 @@ name: Update conference deadlines
 
 on:
   schedule:
-    # 每周一 00:00 UTC 跑一次
-    - cron: "0 0 * * 1"
+    # 多伦多时间周一凌晨 2 点。GitHub Actions cron 只认 UTC，这里按夏令时(EDT, UTC-4)算的 UTC 06:00；
+    # 冬令时(EST, UTC-5)期间实际会在多伦多时间的凌晨 3 点跑，一年中大约 4 个月有 1 小时漂移，不影响周任务
+    - cron: "0 6 * * 1"
   workflow_dispatch: {}
 
 permissions:
