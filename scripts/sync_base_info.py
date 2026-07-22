@@ -19,7 +19,7 @@ import tempfile
 
 import openpyxl
 import yaml
-from openpyxl.styles import Font
+from openpyxl.styles import Font, PatternFill
 
 REPO_URL = "https://github.com/ccfddl/ccf-deadlines.git"
 XLSX_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "Conferences.xlsx")
@@ -32,6 +32,17 @@ ACRONYM_COL = "刊物简称"
 LOCATION_COL = "会议地点"
 DATE_COL = "会议时间"
 URL_COL = "会议URL"
+
+# 本次运行（sync_base_info.py + check_workshop_deadlines.py 算一个完整周期）里有变化的行，
+# 整行标黄；每次 sync_base_info.py 开跑会先把上一轮的高亮清空，重新开始记
+HIGHLIGHT_FILL = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+NO_FILL = PatternFill(fill_type=None)
+
+
+def set_row_highlight(row, highlighted: bool):
+    fill = HIGHLIGHT_FILL if highlighted else NO_FILL
+    for cell in row:
+        cell.fill = fill
 
 US_STATES = {
     "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut",
@@ -198,22 +209,31 @@ def main():
         header = [c.value for c in ws[1]]
         idx = {name: i for i, name in enumerate(header) if name}
 
-        refreshed, skipped = 0, 0
+        refreshed, skipped, changed = 0, 0, 0
         for row in ws.iter_rows(min_row=2):
             acronym = row[idx[ACRONYM_COL]].value
             if not acronym:
                 continue
+            # 新一轮同步开始，先清掉上一轮留下的高亮
+            set_row_highlight(row, False)
+
             slug = resolve_ccfddl_slug(acronym)
             entry = lookup.get(slug) if slug else None
             if entry is None:
                 skipped += 1
                 continue
             row_cells = {col: row[idx[col]] for col in (LOCATION_COL, DATE_COL, URL_COL)}
+            # openpyxl 存盘再读回来会把 "" 变成 None，比较时要当成一样，否则每次都会被误判成"变了"
+            before = {col: (cell.value or "") for col, cell in row_cells.items()}
             refresh_row(row_cells, entry, slug)
+            after = {col: (cell.value or "") for col, cell in row_cells.items()}
+            if before != after:
+                set_row_highlight(row, True)
+                changed += 1
             refreshed += 1
 
         wb.save(XLSX_PATH)
-        print(f"Refreshed {refreshed} conferences, left {skipped} manual/unmatched rows untouched.")
+        print(f"Refreshed {refreshed} conferences ({changed} changed), left {skipped} manual/unmatched rows untouched.")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

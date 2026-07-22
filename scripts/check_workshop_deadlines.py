@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 import openpyxl
 import requests
-from openpyxl.styles import Font
+from openpyxl.styles import Font, PatternFill
 
 XLSX_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "Conferences.xlsx")
 SHEET_NAME = "2027A类会议"
@@ -33,6 +33,10 @@ URL_COL = "会议URL"
 DEADLINE_COL = "Workshop Deadline"
 WORKSHOP_URL_COL = "workshopURL"
 NOTES_COL = "备注"
+
+# 跟 sync_base_info.py 用同一个颜色；这里只负责"新增"高亮，不清空——
+# 清空动作统一放在 sync_base_info.py 开跑的时候做，因为它是每轮周期的第一步
+HIGHLIGHT_FILL = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (ConferenceTracker workshop-deadline-bot)"}
 REQUEST_TIMEOUT = 15
@@ -313,6 +317,8 @@ def main():
         old_deadline = row[idx[DEADLINE_COL]].value
         if deadline_value != old_deadline:
             log_ws.append([acronym, DEADLINE_COL, old_deadline, deadline_value, now])
+            for cell in row:
+                cell.fill = HIGHLIGHT_FILL
 
         row[idx[DEADLINE_COL]].value = deadline_value
         set_url(row[idx[WORKSHOP_URL_COL]], page_url)
