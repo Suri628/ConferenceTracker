@@ -115,6 +115,50 @@ def extract_deadline(text: str, loose: bool = False):
     return None
 
 
+MONTH_NUM = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+
+def normalize_deadline(raw: str) -> str:
+    """把抽取出来的各种日期写法统一成 yyyy-mm-dd；解析不出来就原样返回"""
+    if not raw:
+        return raw
+    raw = raw.strip()
+
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})$", raw)
+    if m:
+        return raw
+
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})$", raw)
+    if m:
+        month, day, year = m.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
+
+    # 'October 3, 2025' / 'Oct. 3rd 2025'
+    m = re.match(r"([A-Za-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$", raw)
+    if m:
+        month_name, day, year = m.groups()
+        month = MONTH_NUM.get(month_name.lower())
+        if month:
+            return f"{year}-{month:02d}-{int(day):02d}"
+
+    # '24 July 2026' / 'Fri 17 Oct 2025'（可能带星期几前缀）
+    m = re.match(
+        r"(?:" + WEEKDAY + r"\s+)?(\d{1,2})\s+([A-Za-z]+)\.?\s+(\d{4})$", raw
+    )
+    if m:
+        day, month_name, year = m.groups()
+        month = MONTH_NUM.get(month_name.lower())
+        if month:
+            return f"{year}-{month:02d}-{int(day):02d}"
+
+    return raw
+
+
 def year_looks_stale(deadline_str: str, conf_year) -> bool:
     """抽到的日期年份和记录的会议年份差太多，很可能是抓到了旧年份的页面（官网URL/标题没更新）"""
     if not deadline_str or not conf_year:
@@ -176,7 +220,7 @@ def check_one(acronym: str, year, official_url: str):
                 return None, "not_yet_announced", url, (
                     f"抓到疑似过期页面（页面日期 {deadline} 和会议年份 {year} 对不上），需人工核实：{url}"
                 )
-            return deadline, "confirmed", url, "extracted from official site"
+            return normalize_deadline(deadline), "confirmed", url, "extracted from official site"
         if looks_not_applicable(text):
             return None, "not_applicable", url, "official site indicates no workshops"
 
@@ -195,7 +239,7 @@ def check_one(acronym: str, year, official_url: str):
                 return None, "not_yet_announced", link, (
                     f"抓到疑似过期页面（页面日期 {deadline} 和会议年份 {year} 对不上），需人工核实：{link}"
                 )
-            return deadline, "confirmed", link, "extracted via search fallback"
+            return normalize_deadline(deadline), "confirmed", link, "extracted via search fallback"
 
     if not BRAVE_API_KEY:
         return None, "not_yet_announced", "", "需要人工核实官网（未配置搜索API做兜底）"

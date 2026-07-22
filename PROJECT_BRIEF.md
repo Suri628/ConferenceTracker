@@ -46,8 +46,7 @@ category                         # 对应 ccfddl 的 sub 分类（AI/CG/CT/DB/DS
 location_city
 location_country
 location_region                  # North America / Latin America / Europe / Asia / Other（记录但不过滤）
-date_start
-date_end
+date                              # mm.dd-mm.dd 格式；该会议还没发布当届信息则为 TBD
 official_url
 main_cfp_deadline                 # 主会论文投稿 deadline（同步自 ccfddl）
 workshop_proposal_deadline          # 核心字段：举办者申请办 workshop 的 deadline（自行抓取）
@@ -58,6 +57,10 @@ last_changed_at
 source_url                          # 抓到这条信息的具体页面链接
 notes                                # 备注（原"状态"列改名，保留括号内容，如"只有Forum/Tutorial"）
 ```
+
+## 只展示 2027 届
+
+表格里所有会议统一只显示 `TARGET_YEAR`（当前硬编码为 2027，写在 `scripts/sync_base_info.py` 顶部，明年需要手动改）这一届的数据。如果 ccfddl 还没有该会议 2027 届的记录，`date`/`location_city`/`location_country`/`official_url` 全部留空或填 TBD，不会显示 2025/2026 等旧年份信息。
 
 ## 存储格式：xlsx
 

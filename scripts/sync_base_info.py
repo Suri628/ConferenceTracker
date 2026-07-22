@@ -4,6 +4,7 @@
 不会覆盖已抓取的 workshop_proposal_* 相关列（那部分由 check_workshop_deadlines.py 维护）。
 """
 import glob
+import json
 import os
 import re
 import shutil
@@ -17,11 +18,16 @@ from openpyxl.utils import get_column_letter
 
 REPO_URL = "https://github.com/ccfddl/ccf-deadlines.git"
 XLSX_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "conferences.xlsx")
+OVERRIDES_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "conference_overrides.json")
+
+# 表格只关心这一届；没有 TARGET_YEAR 数据的会议，日期/地点/官网都填 TBD，不展示旧年份的信息。
+# 到了下一年需要手动把这个数字往前推一年。
+TARGET_YEAR = 2027
 
 COLUMNS = [
     "conference_id", "name", "acronym", "year", "category",
     "location_city", "location_country", "location_region",
-    "date_start", "date_end", "official_url",
+    "date", "official_url",
     "main_cfp_deadline",
     "workshop_proposal_deadline", "workshop_proposal_status",
     "workshop_page_url", "last_checked_at", "last_changed_at",
@@ -80,13 +86,15 @@ def slugify(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", title.lower())
 
 
-def pick_latest_conf(confs: list) -> dict:
-    def year_key(c):
+def pick_target_year_conf(confs: list, target_year: int) -> dict:
+    """只要 target_year 那一届的数据；ccfddl 里没有就返回空 dict（调用方据此填 TBD）"""
+    for c in confs or []:
         try:
-            return int(c.get("year", 0))
+            if int(c.get("year", 0)) == target_year:
+                return c
         except (TypeError, ValueError):
-            return 0
-    return max(confs, key=year_key) if confs else {}
+            continue
+    return {}
 
 
 def split_place(place: str):
@@ -109,8 +117,38 @@ def region_for(country: str) -> str:
 
 def clean_date(value) -> str:
     if not value:
-        return ""
+        return "TBD"
     return str(value).split(" ")[0]
+
+
+MONTH_NUM = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+DATE_RANGE_RE = re.compile(
+    r"([A-Za-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?"
+    r"\s*(?:-|–|—|to)\s*"
+    r"(?:([A-Za-z]+)\.?\s+)?(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})"
+)
+
+
+def format_date_range(raw: str) -> str:
+    """把 ccfddl 里 'July 23-29, 2022' / 'October 12 - 16, 2026' 这类自由文本
+    转成 mm.dd-mm.dd；解析不出来就原样返回，交给人工核实"""
+    if not raw:
+        return "TBD"
+    m = DATE_RANGE_RE.search(raw)
+    if not m:
+        return raw
+    mon1, day1, mon2, day2, _year = m.groups()
+    mon1_num = MONTH_NUM.get(mon1.lower())
+    mon2_num = MONTH_NUM.get(mon2.lower()) if mon2 else mon1_num
+    if not mon1_num or not mon2_num:
+        return raw
+    return f"{mon1_num:02d}.{int(day1):02d}-{mon2_num:02d}.{int(day2):02d}"
 
 
 def load_ccf_a_conferences(conference_dir: str) -> list:
@@ -125,24 +163,65 @@ def load_ccf_a_conferences(conference_dir: str) -> list:
             rank = entry.get("rank") or {}
             if rank.get("ccf") != "A":
                 continue
-            latest = pick_latest_conf(entry.get("confs") or [])
-            city, country = split_place(latest.get("place", ""))
-            timeline = (latest.get("timeline") or [{}])[0]
-            rows.append({
-                "conference_id": slugify(entry["title"]),
-                "name": entry.get("description", ""),
-                "acronym": entry["title"],
-                "year": latest.get("year", ""),
-                "category": entry.get("sub", ""),
-                "location_city": city,
-                "location_country": country,
-                "location_region": region_for(country),
-                "date_start": latest.get("date", ""),
-                "date_end": "",
-                "official_url": latest.get("link", ""),
-                "main_cfp_deadline": clean_date(timeline.get("deadline", "")),
-            })
+            target = pick_target_year_conf(entry.get("confs") or [], TARGET_YEAR)
+            if target:
+                city, country = split_place(target.get("place", ""))
+                timeline = (target.get("timeline") or [{}])[0]
+                row = {
+                    "conference_id": slugify(entry["title"]),
+                    "name": entry.get("description", ""),
+                    "acronym": entry["title"],
+                    "year": TARGET_YEAR,
+                    "category": entry.get("sub", ""),
+                    "location_city": city,
+                    "location_country": country,
+                    "location_region": region_for(country),
+                    "date": format_date_range(target.get("date", "")),
+                    "official_url": target.get("link", ""),
+                    "main_cfp_deadline": clean_date(timeline.get("deadline", "")),
+                }
+            else:
+                # ccfddl 还没有 TARGET_YEAR 这一届的数据，一律 TBD，不展示旧年份信息
+                row = {
+                    "conference_id": slugify(entry["title"]),
+                    "name": entry.get("description", ""),
+                    "acronym": entry["title"],
+                    "year": TARGET_YEAR,
+                    "category": entry.get("sub", ""),
+                    "location_city": "",
+                    "location_country": "",
+                    "location_region": "",
+                    "date": "TBD",
+                    "official_url": "",
+                    "main_cfp_deadline": "TBD",
+                }
+            rows.append(row)
     rows.sort(key=lambda r: r["conference_id"])
+    return rows
+
+
+def load_overrides(path: str) -> dict:
+    """人工维护的会议增删/排序配置，格式见 data/conference_overrides.json：
+    - excluded_ids: 想从表里删掉的 conference_id（下次 sync 也不会再自动加回来）
+    - custom_order: 想固定在前面的 conference_id 顺序，没写到的会议按字母序排在后面
+    """
+    if not os.path.exists(path):
+        return {"excluded_ids": [], "custom_order": []}
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return {
+        "excluded_ids": data.get("excluded_ids", []),
+        "custom_order": data.get("custom_order", []),
+    }
+
+
+def apply_overrides(rows: list, overrides: dict) -> list:
+    excluded = set(overrides.get("excluded_ids", []))
+    rows = [r for r in rows if r["conference_id"] not in excluded]
+
+    custom_order = overrides.get("custom_order", [])
+    order_index = {cid: i for i, cid in enumerate(custom_order)}
+    rows.sort(key=lambda r: (order_index.get(r["conference_id"], len(order_index)), r["conference_id"]))
     return rows
 
 
@@ -200,6 +279,7 @@ def main():
     try:
         conference_dir = clone_ccfddl(tmpdir)
         rows = load_ccf_a_conferences(conference_dir)
+        rows = apply_overrides(rows, load_overrides(OVERRIDES_PATH))
         os.makedirs(os.path.dirname(XLSX_PATH), exist_ok=True)
         write_xlsx(rows, XLSX_PATH)
     finally:
