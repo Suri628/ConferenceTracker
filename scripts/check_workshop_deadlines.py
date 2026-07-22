@@ -191,7 +191,13 @@ def brave_search(query: str):
         resp.raise_for_status()
         results = resp.json().get("web", {}).get("results", [])
         return [item["url"] for item in results]
-    except (requests.RequestException, KeyError, ValueError):
+    except requests.RequestException as e:
+        # 打出来方便在 Actions 日志里排查（比如 key 无效/限流/参数错误），不要静默吞掉
+        status = getattr(e.response, "status_code", "?")
+        print(f"  [brave_search] request failed ({status}): {e}", file=sys.stderr)
+        return []
+    except (KeyError, ValueError) as e:
+        print(f"  [brave_search] unexpected response format: {e}", file=sys.stderr)
         return []
 
 
@@ -282,12 +288,13 @@ def main():
                 log_ws.append([cid, "workshop_proposal_deadline", old_deadline, deadline, now])
             if status != old_status:
                 log_ws.append([cid, "workshop_proposal_status", old_status, status, now])
-            row[idx["workshop_proposal_deadline"]].value = deadline
-            row[idx["workshop_proposal_status"]].value = status
-            row[idx["workshop_page_url"]].value = page_url
             row[idx["last_changed_at"]].value = now
-            row[idx["notes"]].value = note
 
+        # deadline/status 不变时也要刷新 notes，否则"未配置搜索API"这类过时提示会一直留着
+        row[idx["workshop_proposal_deadline"]].value = deadline
+        row[idx["workshop_proposal_status"]].value = status
+        row[idx["workshop_page_url"]].value = page_url
+        row[idx["notes"]].value = note
         row[idx["last_checked_at"]].value = now
         row[idx["source_url"]].value = page_url
 
