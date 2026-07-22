@@ -42,23 +42,30 @@ DATE_TOKEN = (
 )
 
 # 高精度：要求"workshop"关键词紧邻 deadline，用于还没确认是 workshop 专属页面时（如会议主页）
+# "deadline"/"due"都算数（有些官网写"Proposals Due <date>"而不是"Deadline: <date>"）
 STRICT_DEADLINE_PATTERNS = [
     re.compile(
-        r"workshop[s]?\s*(?:(?:/|and|&)\s*tutorial[s]?)?\s*(?:proposal|paper)?\s*"
-        r"(?:submission)?\s*deadline\s*[:\-]?\s*" + DATE_TOKEN,
+        r"workshop[s]?\s*(?:(?:/|and|&)\s*tutorial[s]?)?\s*(?:proposal|paper)?s?\s*"
+        r"(?:submission)?\s*(?:deadline|due)\s*[:\-]?\s*" + DATE_TOKEN,
         re.IGNORECASE,
     ),
     re.compile(
         r"(?:call for workshop proposals?|workshop proposal submission)[^.\n]{0,80}" + DATE_TOKEN,
         re.IGNORECASE,
     ),
-    re.compile(DATE_TOKEN + r"[^.\n]{0,40}workshop[s]?\s*(?:/|and)?\s*tutorial[s]?\s*proposal", re.IGNORECASE),
+    # 日期写在"workshop"前面的情况（如 PPoPP 的"Important Dates"表格），窗口收窄到15字符，
+    # 避免跨句子把不相关的日期（如 artifact submission deadline）误判成 workshop 的日期
+    re.compile(DATE_TOKEN + r"[^.\n]{0,15}workshop[s]?\s*(?:/|and)?\s*tutorial[s]?\s*proposal", re.IGNORECASE),
 ]
 
-# 宽松：已经确认是通过"workshop"链接跳转进来的页面，不再要求"workshop"字面出现在deadline旁边
+# 宽松：已经确认是通过"workshop"链接跳转进来的页面，不再要求"workshop"字面出现在deadline旁边。
+# 这类页面本身就是workshop专属页，"deadline"往往写成"Deadline for submission: <date>"这种
+# 没有"proposal"字样紧邻的形式，所以放宽到只要求 deadline 关键词即可，按从严到宽的顺序尝试
 LOOSE_DEADLINE_PATTERNS = STRICT_DEADLINE_PATTERNS + [
     re.compile(DATE_TOKEN + r"[^.\n]{0,60}proposal[^.\n]{0,20}deadline", re.IGNORECASE),
     re.compile(r"proposal[^.\n]{0,20}(?:submission)?\s*deadline\s*[:\-]?\s*" + DATE_TOKEN, re.IGNORECASE),
+    re.compile(r"deadline\s*(?:for\s+submission)?\s*[:\-]?\s*" + DATE_TOKEN, re.IGNORECASE),
+    re.compile(DATE_TOKEN + r"[^.\n]{0,30}deadline", re.IGNORECASE),
 ]
 
 NOT_APPLICABLE_HINTS = [
@@ -108,6 +115,20 @@ def extract_deadline(text: str, loose: bool = False):
     return None
 
 
+def year_looks_stale(deadline_str: str, conf_year) -> bool:
+    """抽到的日期年份和记录的会议年份差太多，很可能是抓到了旧年份的页面（官网URL/标题没更新）"""
+    if not deadline_str or not conf_year:
+        return False
+    years = re.findall(r"\d{4}", deadline_str)
+    if not years:
+        return False
+    try:
+        conf_year = int(conf_year)
+    except (TypeError, ValueError):
+        return False
+    return all(abs(int(y) - conf_year) > 1 for y in years)
+
+
 def looks_not_applicable(text: str) -> bool:
     lowered = text.lower()
     return any(hint in lowered for hint in NOT_APPLICABLE_HINTS)
@@ -151,6 +172,10 @@ def check_one(acronym: str, year, official_url: str):
         text = strip_html(html)
         deadline = extract_deadline(text, loose=loose)
         if deadline:
+            if year_looks_stale(deadline, year):
+                return None, "not_yet_announced", url, (
+                    f"抓到疑似过期页面（页面日期 {deadline} 和会议年份 {year} 对不上），需人工核实：{url}"
+                )
             return deadline, "confirmed", url, "extracted from official site"
         if looks_not_applicable(text):
             return None, "not_applicable", url, "official site indicates no workshops"
@@ -166,6 +191,10 @@ def check_one(acronym: str, year, official_url: str):
         text = strip_html(html)
         deadline = extract_deadline(text, loose=True)
         if deadline:
+            if year_looks_stale(deadline, year):
+                return None, "not_yet_announced", link, (
+                    f"抓到疑似过期页面（页面日期 {deadline} 和会议年份 {year} 对不上），需人工核实：{link}"
+                )
             return deadline, "confirmed", link, "extracted via search fallback"
 
     if not BRAVE_API_KEY:
