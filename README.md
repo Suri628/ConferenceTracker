@@ -1,81 +1,84 @@
 # Conference Tracker
 
-追踪 CCF-A 类学术会议每年的举办时间、地点，核心是 **workshop proposal 提交截止时间**（申请举办 workshop 的 deadline，不是论文投稿 deadline）。
+追踪一批学术会议每年的举办时间、地点，核心是 **workshop proposal 提交截止时间**（申请举办 workshop 的 deadline，不是论文投稿 deadline）。
 
 设计背景和取舍见 [PROJECT_BRIEF.md](PROJECT_BRIEF.md)。
 
 ## 数据在哪
 
-[data/conferences.xlsx](data/conferences.xlsx)，两个 sheet：
-
-- **会议数据**：58 个 CCF-A 会议，每行一条记录，字段见下表
-- **变更日志**：每次自动运行如果有字段变化，会在这里追加一行（会议、字段名、旧值、新值、变更时间），方便回溯
+[data/Conferences.xlsx](data/Conferences.xlsx)，sheet **`2027A类会议`**，61 个会议，每行一条记录：
 
 | 列 | 说明 |
 |---|---|
-| conference_id | 唯一标识，小写（如 `ppopp`），配置增删/排序时用这个 |
-| name / acronym | 全称 / 缩写 |
-| year | 统一是 `TARGET_YEAR`（当前 2027） |
-| category | 对应 CCF 分类（AI/CG/CT/DB/DS/HI/MX/NW/SC/SE） |
-| location_city / location_country | 地点；该会议还没发布这一届信息则为空 |
-| location_region | North America / Latin America / Europe / Asia / Other，**只记录不过滤** |
-| date | `mm.dd-mm.dd`；官网自己都没定具体日期就保留原始描述或 `TBD` |
-| official_url | 官网链接 |
-| main_cfp_deadline | 主会论文投稿 deadline |
-| workshop_proposal_deadline | **核心字段**，`yyyy-mm-dd` |
-| workshop_proposal_status | `confirmed` / `not_yet_announced` / `not_applicable` |
-| workshop_page_url / source_url | 抓到 workshop 信息的具体页面 |
-| last_checked_at / last_changed_at | 最近一次检查 / 最近一次实际变化的时间 |
-| notes | 备注，抓取异常（如疑似过期页面）会写在这里 |
+| 方向 | 领域分类（系统/网络/安全/软工/理论/数据库/AI/交互/多媒体/综合/半导体...） |
+| 刊物简称 / 刊物全称 | 缩写 / 全称 |
+| 出版方 | ACM / IEEE / USENIX / Springer 等 |
+| 会议地点 | `City, (State), Country`，还没公布就是 `TBD` |
+| 会议时间 | `mm.dd-mm.dd`，还没公布就是 `TBD` |
+| Workshop Deadline | **核心字段**，`yyyy.mm.dd`，还没公布就是 `TBD`；确定或抓取到的都会自动做成可点击超链接对应的来源页 |
+| 会议URL | 官网链接（超链接） |
+| workshopURL | 抓到 workshop 信息的具体页面（超链接） |
+| 备注 | 抓取来源/异常说明，走 Brave Search 兜底抓到的会标"需要人工审核" |
+
+另有一个 `变更日志` sheet，`check_workshop_deadlines.py` 每次跑如果 Workshop Deadline 有变化就追加一行，方便回溯。
+
+会议的**数量、名字、顺序完全由你在 xlsx 里手动维护**，两个脚本都不会自动增删或重排行。
 
 ## 两个脚本
 
 ```bash
 pip install -r scripts/requirements.txt
 
-# 1. 同步基础字段（地点/日期/主会deadline），数据来自 ccfddl/ccf-deadlines
+# 1. 同步基础字段（地点/日期/官网），数据来自 ccfddl/ccf-deadlines
 python scripts/sync_base_info.py
 
 # 2. 抓 workshop proposal deadline（核心），官网直连优先，猜不中用 Brave Search 兜底
 python scripts/check_workshop_deadlines.py
-python scripts/check_workshop_deadlines.py --only ppopp hpca   # 只跑指定会议，调试用
+python scripts/check_workshop_deadlines.py --only PPoPP HPCA   # 只跑指定会议，按"刊物简称"，调试用
 ```
 
-两个脚本分工明确：`sync_base_info.py` 只重建"基础信息"列，不会碰 `workshop_proposal_*` 相关列；`check_workshop_deadlines.py` 只更新这几列。每次 `sync_base_info.py` 跑完都会**整个重建**"会议数据" sheet，所以：
+**行为规则**：`sync_base_info.py` 只根据"刊物简称"去 ccfddl 匹配对应会议，刷新它的"会议地点"/"会议时间"/"会议URL"；匹配不上（不在 CCF 名单里、你手动加的会议，如 ISSCC/IEDM/VLSI/WINE）原样保留，不碰。`check_workshop_deadlines.py` 则对 xlsx 里**当前所有行**一视同仁地去抓 workshop deadline，不管这行是不是在 ccfddl 里能找到。
 
-> **不要直接在 Excel 里删行、拖动顺序去调整会议列表**，下次同步会把这类结构性改动冲掉。`notes` 这种内容型单元格的手改是安全的，会被保留。
+> **不要直接在 Excel 里改"会议地点"/"会议时间"/"会议URL"这三列**——下次 `sync_base_info.py` 一跑就会被 ccfddl 的数据覆盖掉（除非该会议不在 ccfddl 里）。想手动订正错误数据，用下面的覆盖表。
 
 ## 手动增删 / 调整会议顺序
 
-编辑 [data/conference_overrides.json](data/conference_overrides.json)：
+**直接在 xlsx 里改**——删行、拖顺序、加一行手打的会议都可以，`conference_id` 之类的辅助字段不需要维护。加一行新会议时，"刊物简称"填对应缩写即可，其余基础字段自己填或留空；下次跑完整流程（`sync_base_info.py` 然后 `check_workshop_deadlines.py`）会自动帮你把 Workshop Deadline 等列补上。
 
-```json
-{
-  "excluded_ids": ["stoc", "focs"],
-  "custom_order": ["ppopp", "hpca", "chi"]
-}
+## 订正 ccfddl 的错误数据
+
+ccfddl 是众包维护的项目，个别字段可能滞后或出错（比如实测发现过 HPCA 2027 的日期是错的）。发现问题不用去改 ccfddl 上游，在 [scripts/sync_base_info.py](scripts/sync_base_info.py) 顶部加进 `LOCATION_OVERRIDES` / `DATE_OVERRIDES` 就行，以后每次同步都不会被错误数据覆盖回去：
+
+```python
+LOCATION_OVERRIDES = {"chi": "Pittsburgh, (PA), USA"}
+DATE_OVERRIDES = {"hpca": "03.20-03.24"}
 ```
 
-- `excluded_ids`：填 `conference_id`，这些会议会从表里删掉，且不会被自动同步加回来
-- `custom_order`：填想置顶的顺序，没写到的会议按字母序排在后面
+key 是"刊物简称"小写去掉符号后的样子（比如 `S&P` -> `sp`）。
 
-改完跑一次 `sync_base_info.py`（或等下次 Actions 自动跑）生效。
+## 怎么判断抓到的信息是不是对的
+
+没有任何一列能保证 100% 准，越关键的信息越应该点开 `会议URL` / `workshopURL` 这两个超链接亲自确认：
+- 备注写 `extracted from official site` —— 直接从官网正则抠出来的，相对可信但也可能抓错
+- 备注写 `...搜索兜底...需要人工审核` —— 走的是 Brave 搜索，没验证过页面是否确属该会议
+- `TBD` / `需要人工核实官网` —— 脚本自己都没把握，别当真
 
 ## GitHub Actions 自动运行
 
 [.github/workflows/check_deadlines.yml](.github/workflows/check_deadlines.yml)：
 
 - **定时**：每周一 06:00 UTC（对应多伦多时间凌晨 2 点左右，夏令时/冬令时切换时有约 1 小时漂移，不影响周任务）
-- 跑完依次执行 `sync_base_info.py` → `check_workshop_deadlines.py`，`data/conferences.xlsx` 有变化就自动 commit + push
+- 跑完依次执行 `sync_base_info.py` → `check_workshop_deadlines.py`，`data/Conferences.xlsx` 有变化就自动 commit + push
 
 **需要的仓库设置**（一次性）：
-1. `Settings → Secrets and variables → Actions → Secrets` 里配置 `BRAVE_SEARCH_API_KEY`（不配也能跑，只是猜不中官网的会议会停在 `not_yet_announced`，notes 里提示需要人工核实）
+1. `Settings → Secrets and variables → Actions → Secrets` 里配置 `BRAVE_SEARCH_API_KEY`（不配也能跑，只是猜不中官网的会议会停在 `TBD`，备注里提示需要人工核实）
 2. `Settings → Actions → General → Workflow permissions` 选 **"Read and write permissions"**（否则最后一步 `git push` 会失败）
 
 **手动触发**：GitHub 仓库页面 → `Actions` 标签页 → 左侧选 "Update conference deadlines" → 右侧 "Run workflow"
 
 ## 已知局限
 
-- 只覆盖 CCF-A 类会议，且严格只展示 `TARGET_YEAR`（明年要用记得改 [scripts/sync_base_info.py](scripts/sync_base_info.py) 顶部的 `TARGET_YEAR` 常量）；官网还没发布这一届的会议，日期/地点/官网/deadline 都会是空或 `TBD`，这是预期行为不是 bug
-- 正则抽取 deadline 无法保证 100% 准确，官网页面格式差异很大；已知一种没法完全自动规避的情况：官网页面标题年份和页面内实际日期对不上（如缓存/命名习惯问题），且刚好只差一年时抓取脚本无法识别，需要偶尔人工抽查"变更日志"
-- Brave Search 兜底依赖第三方 API 的搜索结果质量，搜不到、搜到不相关页面都可能发生
+- 只覆盖 xlsx 里你手动确定的这份清单，严格只展示 `TARGET_YEAR`（明年要用记得改 [scripts/sync_base_info.py](scripts/sync_base_info.py) 顶部的 `TARGET_YEAR` 常量）
+- ccfddl 数据偶尔滞后/出错，靠 `LOCATION_OVERRIDES`/`DATE_OVERRIDES` 订正已知问题
+- 正则抽取 Workshop Deadline 无法保证 100% 准确，官网页面格式差异很大，已知会把不相关的日期（如 artifact 提交日期）误判成 workshop deadline 的情况发生过，已修复但不保证以后不会有新的类似情况
+- Brave Search 兜底依赖第三方 API 的搜索结果质量，且现在（2026年年中）大部分 2027 届会议本身还没公布 workshop 信息，搜不到不代表脚本有问题

@@ -1,15 +1,17 @@
-"""抓取/核实每个 CCF-A 会议的 workshop proposal 提交截止时间。
+"""抓取/核实每个会议的 workshop proposal 提交截止时间。
+
+目标文件 data/Conferences.xlsx，sheet "2027A类会议"。
 
 策略（由高到低优先级）：
-1. 抓 official_url 页面，找页面里指向 "workshop" 相关的链接并跟进
-2. 找不到就用 Brave Search API 兜底搜索 "{acronym} {year} workshop proposal deadline"
+1. 抓 会议URL 页面，找页面里指向 "workshop" 相关的链接并跟进
+2. 找不到就用 Brave Search API 兜底搜索 "{acronym} {TARGET_YEAR} workshop proposal deadline"
    （需要环境变量 BRAVE_SEARCH_API_KEY，没配置则跳过这一步，
-   结果标记为 not_yet_announced 并在 notes 里提示需要人工核实）
+   结果标记为空并在 备注 里提示需要人工核实）
 3. 对拿到的候选页面文本用正则抽取 deadline
 
 用法：
-    python scripts/check_workshop_deadlines.py                 # 跑全部 58 个会议
-    python scripts/check_workshop_deadlines.py --only ppopp hpca   # 只跑指定会议（验证用）
+    python scripts/check_workshop_deadlines.py                  # 跑全部会议
+    python scripts/check_workshop_deadlines.py --only PPoPP HPCA   # 只跑指定会议（按"刊物简称"，验证用）
 """
 import argparse
 import os
@@ -19,8 +21,19 @@ from datetime import datetime, timezone
 
 import openpyxl
 import requests
+from openpyxl.styles import Font
 
-XLSX_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "conferences.xlsx")
+XLSX_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "Conferences.xlsx")
+SHEET_NAME = "2027A类会议"
+LOG_SHEET_NAME = "变更日志"
+TARGET_YEAR = 2027
+
+ACRONYM_COL = "刊物简称"
+URL_COL = "会议URL"
+DEADLINE_COL = "Workshop Deadline"
+WORKSHOP_URL_COL = "workshopURL"
+NOTES_COL = "备注"
+
 HEADERS = {"User-Agent": "Mozilla/5.0 (ConferenceTracker workshop-deadline-bot)"}
 REQUEST_TIMEOUT = 15
 
@@ -124,19 +137,19 @@ MONTH_NUM = {
 
 
 def normalize_deadline(raw: str) -> str:
-    """把抽取出来的各种日期写法统一成 yyyy-mm-dd；解析不出来就原样返回"""
+    """把抽取出来的各种日期写法统一成 yyyy.mm.dd；解析不出来就原样返回"""
     if not raw:
         return raw
     raw = raw.strip()
 
     m = re.match(r"(\d{4})-(\d{2})-(\d{2})$", raw)
     if m:
-        return raw
+        return f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
 
     m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})$", raw)
     if m:
         month, day, year = m.groups()
-        return f"{year}-{int(month):02d}-{int(day):02d}"
+        return f"{year}.{int(month):02d}.{int(day):02d}"
 
     # 'October 3, 2025' / 'Oct. 3rd 2025'
     m = re.match(r"([A-Za-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$", raw)
@@ -144,7 +157,7 @@ def normalize_deadline(raw: str) -> str:
         month_name, day, year = m.groups()
         month = MONTH_NUM.get(month_name.lower())
         if month:
-            return f"{year}-{month:02d}-{int(day):02d}"
+            return f"{year}.{month:02d}.{int(day):02d}"
 
     # '24 July 2026' / 'Fri 17 Oct 2025'（可能带星期几前缀）
     m = re.match(
@@ -154,7 +167,7 @@ def normalize_deadline(raw: str) -> str:
         day, month_name, year = m.groups()
         month = MONTH_NUM.get(month_name.lower())
         if month:
-            return f"{year}-{month:02d}-{int(day):02d}"
+            return f"{year}.{month:02d}.{int(day):02d}"
 
     return raw
 
@@ -245,7 +258,9 @@ def check_one(acronym: str, year, official_url: str):
                 return None, "not_yet_announced", link, (
                     f"抓到疑似过期页面（页面日期 {deadline} 和会议年份 {year} 对不上），需人工核实：{link}"
                 )
-            return normalize_deadline(deadline), "confirmed", link, "extracted via search fallback"
+            return normalize_deadline(deadline), "confirmed", link, (
+                "extracted via search fallback（搜索兜底抽取，未核实页面是否确属该会议，需要人工审核）"
+            )
 
     if not BRAVE_API_KEY:
         return None, "not_yet_announced", "", "需要人工核实官网（未配置搜索API做兜底）"
@@ -254,49 +269,54 @@ def check_one(acronym: str, year, official_url: str):
 
 def load_rows(path):
     wb = openpyxl.load_workbook(path)
-    ws = wb["会议数据"]
+    ws = wb[SHEET_NAME]
     header = [c.value for c in ws[1]]
-    idx = {name: i for i, name in enumerate(header)}
+    idx = {name: i for i, name in enumerate(header) if name}
     return wb, ws, idx
+
+
+HYPERLINK_FONT = Font(color="0563C1", underline="single")
+
+
+def set_url(cell, url: str):
+    """把 url 写进单元格并做成可点击的超链接"""
+    cell.value = url or ""
+    if url:
+        cell.hyperlink = url
+        cell.font = HYPERLINK_FONT
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--only", nargs="*", help="只处理指定的 conference_id（用于验证）")
+    parser.add_argument("--only", nargs="*", help="只处理指定的会议（按\"刊物简称\"，验证用）")
     args = parser.parse_args()
 
     wb, ws, idx = load_rows(XLSX_PATH)
-    log_ws = wb["变更日志"]
+    if LOG_SHEET_NAME not in wb.sheetnames:
+        log_ws = wb.create_sheet(LOG_SHEET_NAME)
+        log_ws.append(["刊物简称", "字段", "旧值", "新值", "变更时间"])
+    log_ws = wb[LOG_SHEET_NAME]
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     for row in ws.iter_rows(min_row=2):
-        cid = row[idx["conference_id"]].value
-        if args.only and cid not in args.only:
+        acronym = row[idx[ACRONYM_COL]].value
+        if not acronym:
             continue
-        acronym = row[idx["acronym"]].value
-        year = row[idx["year"]].value
-        official_url = row[idx["official_url"]].value
+        if args.only and acronym not in args.only:
+            continue
+        official_url = row[idx[URL_COL]].value
 
-        print(f"Checking {acronym} ({cid}) ...")
-        deadline, status, page_url, note = check_one(acronym, year, official_url)
+        print(f"Checking {acronym} ...")
+        deadline, status, page_url, note = check_one(acronym, TARGET_YEAR, official_url)
+        deadline_value = deadline if deadline else "TBD"
 
-        old_deadline = row[idx["workshop_proposal_deadline"]].value
-        old_status = row[idx["workshop_proposal_status"]].value
+        old_deadline = row[idx[DEADLINE_COL]].value
+        if deadline_value != old_deadline:
+            log_ws.append([acronym, DEADLINE_COL, old_deadline, deadline_value, now])
 
-        if deadline != (old_deadline or None) or status != (old_status or "not_yet_announced"):
-            if deadline != old_deadline:
-                log_ws.append([cid, "workshop_proposal_deadline", old_deadline, deadline, now])
-            if status != old_status:
-                log_ws.append([cid, "workshop_proposal_status", old_status, status, now])
-            row[idx["last_changed_at"]].value = now
-
-        # deadline/status 不变时也要刷新 notes，否则"未配置搜索API"这类过时提示会一直留着
-        row[idx["workshop_proposal_deadline"]].value = deadline
-        row[idx["workshop_proposal_status"]].value = status
-        row[idx["workshop_page_url"]].value = page_url
-        row[idx["notes"]].value = note
-        row[idx["last_checked_at"]].value = now
-        row[idx["source_url"]].value = page_url
+        row[idx[DEADLINE_COL]].value = deadline_value
+        set_url(row[idx[WORKSHOP_URL_COL]], page_url)
+        row[idx[NOTES_COL]].value = note
 
     wb.save(XLSX_PATH)
     print(f"Done. Saved {XLSX_PATH}")
