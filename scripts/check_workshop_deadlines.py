@@ -283,11 +283,16 @@ HYPERLINK_FONT = Font(color="0563C1", underline="single")
 
 
 def set_url(cell, url: str):
-    """把 url 写进单元格并做成可点击的超链接"""
+    """把 url 写进单元格并做成可点击的超链接。
+    清空时必须把 cell.hyperlink 也一起清掉——只清 value 的话，openpyxl 存盘再读回来会
+    用残留的 hyperlink 把显示文本"复活"成旧链接，哪怕 value 当时明明已经设成空字符串了"""
     cell.value = url or ""
     if url:
         cell.hyperlink = url
         cell.font = HYPERLINK_FONT
+    else:
+        cell.hyperlink = None
+        cell.font = Font()
 
 
 def main():
