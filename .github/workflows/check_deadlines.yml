@@ -28,7 +28,7 @@ jobs:
 
       - name: Check workshop proposal deadlines
         env:
-          BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
+          BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_APIKEY }}
         run: python scripts/check_workshop_deadlines.py
 
       - name: Commit updated data

@@ -72,9 +72,13 @@ DATE_RANGE_RE = re.compile(
     r"(?:([A-Za-z]+)\.?\s+)?(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})"
 )
 
-# "刊物简称"跟 ccfddl 里的 title 拼写/缩写不完全一致的，手动对齐一下
+# "刊物简称"跟 ccfddl 里的 title 拼写/缩写不完全一致的，手动对齐一下。
+# 值可以写 "slug" 或 "slug:CATEGORY"——ccfddl 里有撞名的情况（比如 FSE 既是软工的
+# Foundations of Software Engineering 又是密码学的 Fast Software Encryption），
+# 不写 CATEGORY 消歧的话，撞名时到底匹配到哪个取决于字典遍历顺序，在 Windows/Linux
+# 上可能不一样（本地测试是对的，Actions 上跑出来却是错的，就是这个原因），所以必须显式指定
 ALIASES = {
-    "usenixatc": "sigopsatc", "fseesec": "fse", "vr": "ieeevr",
+    "usenixatc": "sigopsatc", "fseesec": "fse:SE", "vr": "ieeevr",
     "siggraph": "acmsiggraph", "ubicomp": "ubicompiswc",
     # 不在 ccfddl / CCF 名单里的会议，明确标 None，不去猜
     "isscc": None, "wine": None, "iedm": None, "vlsi": None,
@@ -107,22 +111,32 @@ def slugify(title: str) -> str:
 
 
 def load_ccf_lookup(conference_dir: str) -> dict:
-    """conference_id -> ccfddl entry，覆盖全部 rank（不只是 CCF-A，比如 IJCAI 是 CCF-B）"""
+    """(slug, category) -> ccfddl entry，覆盖全部 rank（不只是 CCF-A，比如 IJCAI 是 CCF-B）。
+    用 (slug, category) 做 key 而不是单纯 slug，是为了容纳 ccfddl 里撞名的会议——
+    两个会议同名但不同 category 时不会互相覆盖，都能查到，靠 ALIASES 里的 CATEGORY 去挑对的那个"""
     lookup = {}
     for path in glob.glob(os.path.join(conference_dir, "*", "*.yml")):
         with open(path, encoding="utf-8") as f:
             docs = yaml.safe_load(f)
         for entry in (docs if isinstance(docs, list) else [docs]):
             if entry:
-                lookup[slugify(entry["title"])] = entry
+                lookup[(slugify(entry["title"]), entry.get("sub"))] = entry
     return lookup
 
 
-def resolve_ccfddl_slug(acronym: str) -> str:
+def resolve_entry(acronym: str, lookup: dict):
+    """按"刊物简称"找 ccfddl 里对应的 entry。撞名的（同一个 slug 对应多个 category）
+    必须在 ALIASES 里用 "slug:CATEGORY" 显式指定，不然宁可返回 None 也不瞎猜——
+    瞎猜的话结果会取决于字典遍历顺序，不同系统上可能不一样"""
     key = slugify(acronym)
-    if key in ALIASES:
-        return ALIASES[key]
-    return key
+    alias = ALIASES[key] if key in ALIASES else key
+    if alias is None:
+        return None
+    if ":" in alias:
+        slug, category = alias.split(":", 1)
+        return lookup.get((slug, category))
+    matches = [entry for (s, _c), entry in lookup.items() if s == alias]
+    return matches[0] if len(matches) == 1 else None
 
 
 def pick_target_year_conf(confs: list, target_year: int) -> dict:
@@ -217,15 +231,15 @@ def main():
             # 新一轮同步开始，先清掉上一轮留下的高亮
             set_row_highlight(row, False)
 
-            slug = resolve_ccfddl_slug(acronym)
-            entry = lookup.get(slug) if slug else None
+            entry = resolve_entry(acronym, lookup)
             if entry is None:
                 skipped += 1
                 continue
+            override_key = slugify(acronym)
             row_cells = {col: row[idx[col]] for col in (LOCATION_COL, DATE_COL, URL_COL)}
             # openpyxl 存盘再读回来会把 "" 变成 None，比较时要当成一样，否则每次都会被误判成"变了"
             before = {col: (cell.value or "") for col, cell in row_cells.items()}
-            refresh_row(row_cells, entry, slug)
+            refresh_row(row_cells, entry, override_key)
             after = {col: (cell.value or "") for col, cell in row_cells.items()}
             if before != after:
                 set_row_highlight(row, True)
