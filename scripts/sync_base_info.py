@@ -16,6 +16,7 @@ xlsx 里已有的行为准——本脚本**不会**自动增删或调整会议�
 只有 data/Conferences.xlsx 还不存在时，才会报错要求先手动建好这张表（这个脚本不负责初始化新表）。
 """
 import glob
+import html
 import os
 import re
 import shutil
@@ -240,24 +241,44 @@ def fetch(url: str):
     return None
 
 
-def strip_html(html: str) -> str:
-    text = re.sub(r"<script.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+def strip_html(raw_html: str) -> str:
+    text = re.sub(r"<script.*?</script>", " ", raw_html, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<style.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
+    # 官网页面里常有 &ndash;/&bull; 这类 HTML 实体，不转义的话日期里的连接符会变成字面的
+    # "&ndash;" 字符串，正则怎么都匹配不上
+    text = html.unescape(text)
     return re.sub(r"\s+", " ", text)
 
 
+# 地点用"专有名词"（每个词首字母必须大写）拼接，而不是任意字母+空格——否则捕获组会
+# 顺着小写单词一路吃进下一句（比如 "...USA next year." 会把 "next year" 也吃进来），
+# 或者在遇到句号后继续吃到下一句的开头（比如 "Bangkok, Thailand . News" 里的 "News"）
+PROPER_NOUN = r"[A-Z][A-Za-z.\-']*(?:\s[A-Z][A-Za-z.\-']*)*"
 LOCATION_HINT_PATTERNS = [
     re.compile(
-        r"(?:will be held|will take place|takes place|to be held|held)\s+in\s+"
-        r"([A-Z][A-Za-z.\-' ]{2,40},\s*[A-Z][A-Za-z.\-' ]{2,40})"
+        r"(?:will be held|will take place|takes place|to be held|held)\b.{0,90}?\bin\s+"
+        rf"({PROPER_NOUN},\s*{PROPER_NOUN}(?:,\s*{PROPER_NOUN})?)"
     ),
-    re.compile(r"(?:Venue|Location)\s*[:\-]\s*([A-Z][A-Za-z.\-' ]{2,40},\s*[A-Z][A-Za-z.\-' ]{2,40})"),
+    re.compile(rf"(?:Venue|Location)\s*[:\-]\s*({PROPER_NOUN},\s*{PROPER_NOUN}(?:,\s*{PROPER_NOUN})?)"),
 ]
 
 
+# 官网上常见的另一种写法是"日在前"（跟 ccfddl 自己"月在前"的 'July 23-29, 2022' 约定不同），
+# 比如 LICS 官网写的是 'Montreal • 21-24 June 2027'。这两个 pattern 专门补这个格式，
+# DAY_FIRST_SAME_MONTH 要求两个日期数字之间不能再出现月份名，避免跟跨月的情形匹配混淆
+DAY_FIRST_SAME_MONTH_RE = re.compile(
+    r"(\d{1,2})(?:st|nd|rd|th)?\s*(?:-|–|—|to)\s*(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\.?,?\s+(\d{4})"
+)
+DAY_FIRST_CROSS_MONTH_RE = re.compile(
+    r"(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\.?\s*(?:-|–|—|to)\s*"
+    r"(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\.?,?\s+(\d{4})"
+)
+
+
 def extract_date_from_page(text: str, year: int):
-    """页面正文里找形如 'March 20-24, 2027' 的日期范围，年份必须匹配 TARGET_YEAR，避免抓到往届的日期"""
+    """页面正文里找日期范围，年份必须匹配 TARGET_YEAR，避免抓到往届的日期。
+    先试'月在前'（'March 20-24, 2027'），再试'日在前'（'21-24 June 2027'）两种常见写法"""
     for m in DATE_RANGE_RE.finditer(text):
         mon1, day1, mon2, day2, y = m.groups()
         if int(y) != year:
@@ -267,14 +288,42 @@ def extract_date_from_page(text: str, year: int):
         if not n1 or not n2:
             continue
         return f"{n1:02d}.{int(day1):02d}-{n2:02d}.{int(day2):02d}"
+
+    for m in DAY_FIRST_CROSS_MONTH_RE.finditer(text):
+        day1, mon1, day2, mon2, y = m.groups()
+        if int(y) != year:
+            continue
+        n1 = MONTH_NUM.get(mon1.lower())
+        n2 = MONTH_NUM.get(mon2.lower())
+        if not n1 or not n2:
+            continue
+        return f"{n1:02d}.{int(day1):02d}-{n2:02d}.{int(day2):02d}"
+
+    for m in DAY_FIRST_SAME_MONTH_RE.finditer(text):
+        day1, day2, mon, y = m.groups()
+        if int(y) != year:
+            continue
+        n = MONTH_NUM.get(mon.lower())
+        if not n:
+            continue
+        return f"{n:02d}.{int(day1):02d}-{n:02d}.{int(day2):02d}"
+
     return None
 
 
-def extract_location_from_page(text: str):
+LOCATION_YEAR_WINDOW = 200
+
+
+def extract_location_from_page(text: str, year: int):
+    """地点提取必须在附近（前后 LOCATION_YEAR_WINDOW 字符内）看到 TARGET_YEAR 才采信，
+    否则很容易把官网首页上"去年/今年"还没更新的地点当成下一届的地点（比如域名不带年份、
+    常年用同一个官网首页的会议，首页可能还停留在上一届的信息）"""
     for pattern in LOCATION_HINT_PATTERNS:
-        m = pattern.search(text)
-        if m:
-            return m.group(1).strip()
+        for m in pattern.finditer(text):
+            start, end = m.span()
+            window = text[max(0, start - LOCATION_YEAR_WINDOW):end + LOCATION_YEAR_WINDOW]
+            if str(year) in window:
+                return m.group(1).strip()
     return None
 
 
@@ -286,7 +335,47 @@ def scrape_official_site(url: str, year: int):
     if not html:
         return None, None
     text = strip_html(html)
-    return extract_location_from_page(text), extract_date_from_page(text, year)
+    return extract_location_from_page(text, year), extract_date_from_page(text, year)
+
+
+def guess_next_year_urls(entry, target_year: int):
+    """ccfddl 有这个会议但还没收录 TARGET_YEAR 这届时，按"最近一届 link 里的年份"规律猜一个
+    候选 URL（比如 pldi26.sigplan.org -> pldi27.sigplan.org，.../sigcomm/2026/ -> .../sigcomm/2027/）。
+    只用最近一届的规律猜，不逐年回溯；调用方需要再拿 str(target_year) 是否出现在页面上做验证，
+    猜出来的 URL 不保证真实存在"""
+    confs = sorted((entry or {}).get("confs") or [], key=lambda c: c.get("year", 0), reverse=True)
+    for c in confs:
+        year, link = c.get("year"), c.get("link")
+        if not link:
+            continue
+        try:
+            year = int(year)
+        except (TypeError, ValueError):
+            continue
+        if year >= target_year:
+            continue
+        candidates = []
+        full_old, full_new = str(year), str(target_year)
+        if full_old in link:
+            candidates.append(link.replace(full_old, full_new))
+        short_old, short_new = f"{year % 100:02d}", f"{target_year % 100:02d}"
+        short_pattern = re.compile(r"(?<!\d)" + re.escape(short_old) + r"(?!\d)")
+        if short_pattern.search(link):
+            candidates.append(short_pattern.sub(short_new, link))
+        return list(dict.fromkeys(candidates))
+    return []
+
+
+def verify_guess(url: str, year: int):
+    """猜出来的 URL 抓一下，页面正文里得看到 TARGET_YEAR 才算数，避免猜中一个能打开但
+    其实是无关页面/占位页的 URL"""
+    html = fetch(url)
+    if not html:
+        return None
+    text = strip_html(html)
+    if str(year) not in text:
+        return None
+    return text
 
 
 HYPERLINK_FONT = Font(color="0563C1", underline="single")
@@ -317,11 +406,26 @@ def refresh_row(row_cells: dict, entry, slug: str):
         row_cells[DATE_COL].value = date or "TBD"
         set_url(row_cells[URL_COL], url)
     else:
-        # ccfddl 没有这个会议，或者有会议但还没有 TARGET_YEAR 这届的数据：
-        # 退化到直接抓"2027 URL"里已经有的官网链接（人工填的，比如 ISSCC/IEDM/VLSI 的官网首页）。
-        # 抓不到就保留原有值不动——这些行大多是人工订正过的，不能被一次抓取失败就打回 TBD
-        existing_url = row_cells[URL_COL].value or ""
-        scraped_location, scraped_date = scrape_official_site(existing_url, TARGET_YEAR)
+        # ccfddl 没有这个会议，或者有会议但还没有 TARGET_YEAR 这届的数据。先试试能不能按
+        # 往届 link 的年份规律猜出这一届的官网（猜中就顺带更新"2027 URL"）；猜不中/没有历史
+        # 规律可猜，就退化到直接抓"2027 URL"里已经有的官网链接（人工填的，比如 ISSCC/IEDM/
+        # VLSI 的官网首页）。抓不到就保留原有值不动——这些行大多是人工订正过的，不能被一次
+        # 抓取失败就打回 TBD
+        guessed_url, guessed_text = None, None
+        for candidate in guess_next_year_urls(entry, TARGET_YEAR):
+            text = verify_guess(candidate, TARGET_YEAR)
+            if text:
+                guessed_url, guessed_text = candidate, text
+                break
+
+        if guessed_text:
+            scraped_location = extract_location_from_page(guessed_text, TARGET_YEAR)
+            scraped_date = extract_date_from_page(guessed_text, TARGET_YEAR)
+            set_url(row_cells[URL_COL], guessed_url)
+        else:
+            existing_url = row_cells[URL_COL].value or ""
+            scraped_location, scraped_date = scrape_official_site(existing_url, TARGET_YEAR)
+
         location = LOCATION_OVERRIDES.get(slug) or scraped_location
         date = DATE_OVERRIDES.get(slug) or scraped_date
         if location:
