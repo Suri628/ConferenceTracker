@@ -2,12 +2,15 @@
 
 目标文件 data/Conferences.xlsx，sheet "2027A类会议"。
 
-策略（由高到低优先级）：
-1. 抓 会议URL 页面，找页面里指向 "workshop" 相关的链接并跟进
-2. 找不到就用 Brave Search API 兜底搜索 "{acronym} {TARGET_YEAR} workshop proposal deadline"
-   （需要环境变量 BRAVE_SEARCH_API_KEY，没配置则跳过这一步，
-   结果标记为空并在 备注 里提示需要人工核实）
-3. 对拿到的候选页面文本用正则抽取 deadline
+策略：
+1. 抓 "2027 URL" 页面，找页面里指向 "workshop" 相关的链接并跟进
+2. 对拿到的候选页面文本用正则抽取 deadline
+3. 抓不到就填 TBD
+
+Brave Search 兜底暂时整体关闭（ENABLE_BRAVE_SEARCH = False）：2027 届 workshop 信息现在
+大部分会议还没公布，搜索引擎兜底搜出来的假阳性（过期页面/不相关页面/regex 瞎抠出的日期）比真
+结果还多。以后临近会议、workshop 信息陆续公布了，把 ENABLE_BRAVE_SEARCH 改回 True 并配置
+BRAVE_SEARCH_API_KEY 环境变量即可重新打开。
 
 用法：
     python scripts/check_workshop_deadlines.py                  # 跑全部会议
@@ -29,10 +32,12 @@ LOG_SHEET_NAME = "变更日志"
 TARGET_YEAR = 2027
 
 ACRONYM_COL = "刊物简称"
-URL_COL = "会议URL"
-DEADLINE_COL = "Workshop Deadline"
-WORKSHOP_URL_COL = "workshopURL"
-NOTES_COL = "备注"
+URL_COL = "2027 URL"
+DEADLINE_COL = "Workshop Submission Deadline（2027）"
+WORKSHOP_URL_COL = "2027 Workshop  Proposal URL"
+
+# 临时关掉搜索引擎兜底，见文件头说明
+ENABLE_BRAVE_SEARCH = False
 
 # 跟 sync_base_info.py 用同一个颜色；这里只负责"新增"高亮，不清空——
 # 清空动作统一放在 sync_base_info.py 开跑的时候做，因为它是每轮周期的第一步
@@ -71,7 +76,7 @@ STRICT_DEADLINE_PATTERNS = [
         re.IGNORECASE,
     ),
     # 日期写在"workshop"前面的情况（如 PPoPP 的"Important Dates"表格），窗口收窄到15字符，
-    # 避免跨句子把不相关的日期（如 artifact submission deadline）误判成 workshop 的日期
+    # 避免跨句子把不相关的日期（如 artifact提交日期）误判成 workshop 的日期
     re.compile(DATE_TOKEN + r"[^.\n]{0,15}workshop[s]?\s*(?:/|and)?\s*tutorial[s]?\s*proposal", re.IGNORECASE),
 ]
 
@@ -196,7 +201,7 @@ def looks_not_applicable(text: str) -> bool:
 
 
 def brave_search(query: str):
-    if not BRAVE_API_KEY:
+    if not ENABLE_BRAVE_SEARCH or not BRAVE_API_KEY:
         return []
     try:
         resp = requests.get(
@@ -219,7 +224,7 @@ def brave_search(query: str):
 
 
 def check_one(acronym: str, year, official_url: str):
-    """返回 (deadline, status, page_url, source_note)"""
+    """返回 (deadline, status, page_url)"""
     visited = set()
     # (url, html, loose) — loose=True 表示这个页面是顺着"workshop"链接跳转到的，可以放宽抽取条件
     candidate_pages = []
@@ -240,14 +245,12 @@ def check_one(acronym: str, year, official_url: str):
         deadline = extract_deadline(text, loose=loose)
         if deadline:
             if year_looks_stale(deadline, year):
-                return None, "not_yet_announced", url, (
-                    f"抓到疑似过期页面（页面日期 {deadline} 和会议年份 {year} 对不上），需人工核实：{url}"
-                )
-            return normalize_deadline(deadline), "confirmed", url, "extracted from official site"
+                return None, "not_yet_announced", url
+            return normalize_deadline(deadline), "confirmed", url
         if looks_not_applicable(text):
-            return None, "not_applicable", url, "official site indicates no workshops"
+            return None, "not_applicable", url
 
-    # 官网猜不中/没抽到，退化到搜索引擎兜底
+    # 官网猜不中/没抽到，退化到搜索引擎兜底（当前默认关闭，见 ENABLE_BRAVE_SEARCH）
     query = f"{acronym} {year} workshop proposal deadline call for workshops"
     for link in brave_search(query):
         if link in visited:
@@ -259,16 +262,10 @@ def check_one(acronym: str, year, official_url: str):
         deadline = extract_deadline(text, loose=True)
         if deadline:
             if year_looks_stale(deadline, year):
-                return None, "not_yet_announced", link, (
-                    f"抓到疑似过期页面（页面日期 {deadline} 和会议年份 {year} 对不上），需人工核实：{link}"
-                )
-            return normalize_deadline(deadline), "confirmed", link, (
-                "extracted via search fallback（搜索兜底抽取，未核实页面是否确属该会议，需要人工审核）"
-            )
+                return None, "not_yet_announced", link
+            return normalize_deadline(deadline), "confirmed", link
 
-    if not BRAVE_API_KEY:
-        return None, "not_yet_announced", "", "需要人工核实官网（未配置搜索API做兜底）"
-    return None, "not_yet_announced", "", "抓取+搜索兜底均未找到，需人工核实"
+    return None, "not_yet_announced", ""
 
 
 def load_rows(path):
@@ -316,7 +313,7 @@ def main():
         official_url = row[idx[URL_COL]].value
 
         print(f"Checking {acronym} ...")
-        deadline, status, page_url, note = check_one(acronym, TARGET_YEAR, official_url)
+        deadline, status, page_url = check_one(acronym, TARGET_YEAR, official_url)
         deadline_value = deadline if deadline else "TBD"
 
         old_deadline = row[idx[DEADLINE_COL]].value
@@ -327,7 +324,6 @@ def main():
 
         row[idx[DEADLINE_COL]].value = deadline_value
         set_url(row[idx[WORKSHOP_URL_COL]], page_url)
-        row[idx[NOTES_COL]].value = note
 
     wb.save(XLSX_PATH)
     print(f"Done. Saved {XLSX_PATH}")

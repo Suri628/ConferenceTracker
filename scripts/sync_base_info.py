@@ -1,11 +1,17 @@
-"""同步会议基础字段（地点/日期/官网），数据来自持续维护的 ccfddl/ccf-deadlines 仓库。
+"""同步会议基础字段（地点/日期/地区/官网），数据来源：
+1. ccfddl/ccf-deadlines 仓库（众包整理自各会议官网，主要数据源）
+2. 会议官网直连兜底（ccfddl 里没有这个会议、或没有 TARGET_YEAR 这一届数据时才用）
 
 目标文件 data/Conferences.xlsx，sheet "2027A类会议"。会议列表（数量/名字/顺序）完全以
-xlsx 里已有的行为准——本脚本**不会**自动增删或调整会议顺序：
-- 已有行的"刊物简称"如果能在 ccfddl 里匹配上，就刷新它的"会议地点"/"会议时间"/"会议URL"
-- 匹配不上（比如不在 CCF 名单里、你手动加的会议，如 ISSCC/IEDM/VLSI/WINE）原样保留，不碰
-- 匹配上了但 ccfddl 里还没有 TARGET_YEAR 这一届的数据，"会议地点"/"会议时间"填 TBD，"会议URL"留空
-- "Workshop Deadline" / "workshopURL" / "备注" 这几列不碰，那部分由 check_workshop_deadlines.py 维护
+xlsx 里已有的行为准——本脚本**不会**自动增删或调整会议顺序，也不碰"方向"/"刊物简称"/
+"刊物全称"/"出版方"/"URL"（dblp链接，人工维护）这几列，只更新：
+- 会议地点（2027）/ 会议时间（2027）/ 所属地区（2027）：ccfddl 匹配上就用 ccfddl 的数据；
+  匹配不上或匹配上了但没有 TARGET_YEAR 这届数据，就尝试直接抓"2027 URL"里已有的官网链接，
+  从页面正文里抠日期/地点；两边都没有就填 TBD
+- 2027 URL：ccfddl 匹配上就用 ccfddl 给的官网链接刷新；匹配不上则保留原值不动（人工维护，
+  比如 ISSCC/IEDM/VLSI/WINE 这些不在 CCF 名单里的会议）
+- Workshop Submission Deadline（2027）/ 2027 Workshop Proposal URL 这两列不碰，那部分由
+  check_workshop_deadlines.py 维护
 
 只有 data/Conferences.xlsx 还不存在时，才会报错要求先手动建好这张表（这个脚本不负责初始化新表）。
 """
@@ -18,6 +24,7 @@ import sys
 import tempfile
 
 import openpyxl
+import requests
 import yaml
 from openpyxl.styles import Font, PatternFill
 
@@ -29,9 +36,13 @@ SHEET_NAME = "2027A类会议"
 TARGET_YEAR = 2027
 
 ACRONYM_COL = "刊物简称"
-LOCATION_COL = "会议地点"
-DATE_COL = "会议时间"
-URL_COL = "会议URL"
+LOCATION_COL = "会议地点\n（2027）"
+DATE_COL = "会议时间\n（2027）"
+REGION_COL = "所属地区\n（2027）"
+URL_COL = "2027 URL"
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (ConferenceTracker base-info-bot)"}
+REQUEST_TIMEOUT = 15
 
 # 本次运行（sync_base_info.py + check_workshop_deadlines.py 算一个完整周期）里有变化的行，
 # 整行标黄；每次 sync_base_info.py 开跑会先把上一轮的高亮清空，重新开始记
@@ -72,6 +83,28 @@ DATE_RANGE_RE = re.compile(
     r"(?:([A-Za-z]+)\.?\s+)?(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})"
 )
 
+# 所属地区：按"会议地点"里出现的国家名（不分大小写子串匹配，按长度从长到短试，
+# 避免"korea"提前命中"south korea"里的子串导致漏掉更精确的匹配）分类。
+# 只覆盖这份清单里目前出现过的国家 + 常见补充；遇到没覆盖到的新国家，脚本会保留原有地区值不动
+# 并且不会报错，需要时在这里补一条
+COUNTRY_REGION = {
+    "united states": "北美", "usa": "北美", "u.s.a": "北美", "u.s": "北美", "canada": "北美",
+    "mexico": "拉美", "panama": "拉美", "panamá": "拉美", "brazil": "拉美", "argentina": "拉美",
+    "chile": "拉美", "colombia": "拉美", "peru": "拉美", "uruguay": "拉美", "costa rica": "拉美",
+    "south america": "拉美",
+    "united kingdom": "欧洲", "uk": "欧洲", "england": "欧洲", "scotland": "欧洲", "ireland": "欧洲",
+    "france": "欧洲", "germany": "欧洲", "netherlands": "欧洲", "denmark": "欧洲", "greece": "欧洲",
+    "italy": "欧洲", "spain": "欧洲", "portugal": "欧洲", "sweden": "欧洲", "norway": "欧洲",
+    "finland": "欧洲", "switzerland": "欧洲", "austria": "欧洲", "belgium": "欧洲", "poland": "欧洲",
+    "czech": "欧洲", "hungary": "欧洲", "iceland": "欧洲", "luxembourg": "欧洲",
+    "china": "亚太", "japan": "亚太", "south korea": "亚太", "korea": "亚太", "singapore": "亚太",
+    "hong kong": "亚太", "taiwan": "亚太", "vietnam": "亚太", "india": "亚太", "australia": "亚太",
+    "new zealand": "亚太", "thailand": "亚太", "malaysia": "亚太", "indonesia": "亚太",
+    "philippines": "亚太", "macau": "亚太",
+    "morocco": "非洲", "south africa": "非洲", "egypt": "非洲", "nigeria": "非洲", "kenya": "非洲",
+    "tunisia": "非洲",
+}
+
 # "刊物简称"跟 ccfddl 里的 title 拼写/缩写不完全一致的，手动对齐一下。
 # 值可以写 "slug" 或 "slug:CATEGORY"——ccfddl 里有撞名的情况（比如 FSE 既是软工的
 # Foundations of Software Engineering 又是密码学的 Fast Software Encryption），
@@ -80,7 +113,7 @@ DATE_RANGE_RE = re.compile(
 ALIASES = {
     "usenixatc": "sigopsatc", "fseesec": "fse:SE", "vr": "ieeevr",
     "siggraph": "acmsiggraph", "ubicomp": "ubicompiswc",
-    # 不在 ccfddl / CCF 名单里的会议，明确标 None，不去猜
+    # 不在 ccfddl / CCF 名单里的会议，明确标 None，不去猜；这些走官网直连兜底（见 scrape_official_site）
     "isscc": None, "wine": None, "iedm": None, "vlsi": None,
 }
 
@@ -184,6 +217,78 @@ def format_location(place: str) -> str:
     return f"{city}, {last}"
 
 
+def infer_region(location: str):
+    """从地点字符串猜所属地区；猜不出来（没见过的国家/地区名）返回 None，调用方应保留原值不动"""
+    if not location or location == "TBD":
+        return "TBD"
+    lowered = location.lower()
+    for country in sorted(COUNTRY_REGION, key=len, reverse=True):
+        if country in lowered:
+            return COUNTRY_REGION[country]
+    return None
+
+
+# ---- 官网直连兜底：只在 ccfddl 没有这个会议/没有 TARGET_YEAR 这届数据时才用 ----
+
+def fetch(url: str):
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        if resp.status_code == 200:
+            return resp.text
+    except requests.RequestException:
+        pass
+    return None
+
+
+def strip_html(html: str) -> str:
+    text = re.sub(r"<script.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<style.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text)
+
+
+LOCATION_HINT_PATTERNS = [
+    re.compile(
+        r"(?:will be held|will take place|takes place|to be held|held)\s+in\s+"
+        r"([A-Z][A-Za-z.\-' ]{2,40},\s*[A-Z][A-Za-z.\-' ]{2,40})"
+    ),
+    re.compile(r"(?:Venue|Location)\s*[:\-]\s*([A-Z][A-Za-z.\-' ]{2,40},\s*[A-Z][A-Za-z.\-' ]{2,40})"),
+]
+
+
+def extract_date_from_page(text: str, year: int):
+    """页面正文里找形如 'March 20-24, 2027' 的日期范围，年份必须匹配 TARGET_YEAR，避免抓到往届的日期"""
+    for m in DATE_RANGE_RE.finditer(text):
+        mon1, day1, mon2, day2, y = m.groups()
+        if int(y) != year:
+            continue
+        n1 = MONTH_NUM.get(mon1.lower())
+        n2 = MONTH_NUM.get(mon2.lower()) if mon2 else n1
+        if not n1 or not n2:
+            continue
+        return f"{n1:02d}.{int(day1):02d}-{n2:02d}.{int(day2):02d}"
+    return None
+
+
+def extract_location_from_page(text: str):
+    for pattern in LOCATION_HINT_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def scrape_official_site(url: str, year: int):
+    """返回 (location, date)，任何一项抓不到就是 None；网络失败/无 url 也是 (None, None)"""
+    if not url:
+        return None, None
+    html = fetch(url)
+    if not html:
+        return None, None
+    text = strip_html(html)
+    return extract_location_from_page(text), extract_date_from_page(text, year)
+
+
 HYPERLINK_FONT = Font(color="0563C1", underline="single")
 
 
@@ -200,17 +305,38 @@ def set_url(cell, url: str):
         cell.font = Font()
 
 
-def refresh_row(row_cells: dict, entry: dict, slug: str):
-    """entry 是 ccfddl 的一条会议记录，刷新 row_cells 里的 会议地点/会议时间/会议URL"""
-    target = pick_target_year_conf(entry.get("confs") or [], TARGET_YEAR)
+def refresh_row(row_cells: dict, entry, slug: str):
+    """entry 是 ccfddl 的一条会议记录（可能是 None）；刷新 会议地点/会议时间/所属地区/2027 URL"""
+    target = pick_target_year_conf((entry or {}).get("confs") or [], TARGET_YEAR)
+
     if target:
-        row_cells[LOCATION_COL].value = LOCATION_OVERRIDES.get(slug) or format_location(target.get("place", ""))
-        row_cells[DATE_COL].value = DATE_OVERRIDES.get(slug) or format_date_range(target.get("date", ""))
-        set_url(row_cells[URL_COL], target.get("link", ""))
+        location = LOCATION_OVERRIDES.get(slug) or format_location(target.get("place", ""))
+        date = DATE_OVERRIDES.get(slug) or format_date_range(target.get("date", ""))
+        url = target.get("link", "") or row_cells[URL_COL].value or ""
+        row_cells[LOCATION_COL].value = location or "TBD"
+        row_cells[DATE_COL].value = date or "TBD"
+        set_url(row_cells[URL_COL], url)
     else:
-        row_cells[LOCATION_COL].value = "TBD"
-        row_cells[DATE_COL].value = "TBD"
-        set_url(row_cells[URL_COL], "")
+        # ccfddl 没有这个会议，或者有会议但还没有 TARGET_YEAR 这届的数据：
+        # 退化到直接抓"2027 URL"里已经有的官网链接（人工填的，比如 ISSCC/IEDM/VLSI 的官网首页）。
+        # 抓不到就保留原有值不动——这些行大多是人工订正过的，不能被一次抓取失败就打回 TBD
+        existing_url = row_cells[URL_COL].value or ""
+        scraped_location, scraped_date = scrape_official_site(existing_url, TARGET_YEAR)
+        location = LOCATION_OVERRIDES.get(slug) or scraped_location
+        date = DATE_OVERRIDES.get(slug) or scraped_date
+        if location:
+            row_cells[LOCATION_COL].value = location
+        elif not row_cells[LOCATION_COL].value:
+            row_cells[LOCATION_COL].value = "TBD"
+        if date:
+            row_cells[DATE_COL].value = date
+        elif not row_cells[DATE_COL].value:
+            row_cells[DATE_COL].value = "TBD"
+
+    region = infer_region(row_cells[LOCATION_COL].value)
+    if region is not None:
+        row_cells[REGION_COL].value = region
+    # region is None：地点字符串里没有认识的国家名，保留原有"所属地区"值不动
 
 
 def main():
@@ -228,7 +354,7 @@ def main():
         header = [c.value for c in ws[1]]
         idx = {name: i for i, name in enumerate(header) if name}
 
-        refreshed, skipped, changed = 0, 0, 0
+        refreshed, matched, scraped, changed = 0, 0, 0, 0
         for row in ws.iter_rows(min_row=2):
             acronym = row[idx[ACRONYM_COL]].value
             if not acronym:
@@ -237,11 +363,8 @@ def main():
             set_row_highlight(row, False)
 
             entry = resolve_entry(acronym, lookup)
-            if entry is None:
-                skipped += 1
-                continue
             override_key = slugify(acronym)
-            row_cells = {col: row[idx[col]] for col in (LOCATION_COL, DATE_COL, URL_COL)}
+            row_cells = {col: row[idx[col]] for col in (LOCATION_COL, DATE_COL, REGION_COL, URL_COL)}
             # openpyxl 存盘再读回来会把 "" 变成 None，比较时要当成一样，否则每次都会被误判成"变了"
             before = {col: (cell.value or "") for col, cell in row_cells.items()}
             refresh_row(row_cells, entry, override_key)
@@ -249,10 +372,14 @@ def main():
             if before != after:
                 set_row_highlight(row, True)
                 changed += 1
+            if entry is not None:
+                matched += 1
+            else:
+                scraped += 1
             refreshed += 1
 
         wb.save(XLSX_PATH)
-        print(f"Refreshed {refreshed} conferences ({changed} changed), left {skipped} manual/unmatched rows untouched.")
+        print(f"Refreshed {refreshed} conferences ({changed} changed): {matched} via ccfddl, {scraped} via official-site fallback.")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

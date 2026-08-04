@@ -27,9 +27,9 @@ jobs:
         run: python scripts/sync_base_info.py
 
       - name: Check workshop proposal deadlines
-        # Brave Search 兜底暂时关掉：2027 届 workshop 信息现在(2026年年中)基本都还没公布，
-        # 搜出来的假阳性比真结果多（过期页面/不相关页面/regex 瞎抠出的日期）。
-        # 等临近会议、workshop 信息陆续公布了再把下面这行取消注释重新打开
+        # Brave Search 兜底目前在代码里硬关闭了（scripts/check_workshop_deadlines.py 里的
+        # ENABLE_BRAVE_SEARCH = False），配不配这个 secret 都不会生效。等以后要重新打开，
+        # 把那个常量改回 True，再取消下面注释配置 key
         # env:
         #   BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_APIKEY }}
         run: python scripts/check_workshop_deadlines.py
